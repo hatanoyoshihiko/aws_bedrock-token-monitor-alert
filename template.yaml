@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Bedrock トークン使用量モニター（IAMユーザー/ロール/APIキー単位）。
+  Model Invocation Logging のログを Lambda で集計し、
+  identity ごとのトークン合計が閾値を超えた場合に SNS 経由でメール通知します。
+
+  前提条件:
+    - Bedrock Model Invocation Logging が有効化済みで、
+      CloudWatch Logs にログが出力されていること。
+
+Parameters:
+  BedrockLogGroupName:
+    Type: String
+    Default: /aws/bedrock/
+    Description: Bedrock Model Invocation Logging の出力先ロググループ名。
+
+  SnsEmail:
+    Type: String
+    Description: 通知先メールアドレス。
+
+  TokenThreshold:
+    Type: Number
+    Default: 1000000
+    Description: >
+      直近の評価ウィンドウ内で identity あたりの
+      入力＋出力トークン合計がこの値を超えると通知。
+
+  WindowMinutes:
+    Type: Number
+    Default: 10
+    Description: トークン集計のスライディングウィンドウ（分）。
+
+  ScheduleRateMinutes:
+    Type: Number
+    Default: 5
+    Description: チェック実行間隔（分）。
+
+  SnsTopicName:
+    Type: String
+    Default: bedrock-token-alert
+    Description: 通知用 SNS トピック名。
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Timeout: 60
+    MemorySize: 256
+
+Resources:
+  # -------------------------------------------
+  # SNS Topic & Subscription
+  # -------------------------------------------
+  TokenAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref SnsTopicName
+
+  TokenAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref TokenAlertTopic
+      Protocol: email
+      Endpoint: !Ref SnsEmail
+
+  # -------------------------------------------
+  # DynamoDB: identity ごとのトークン記録
+  # -------------------------------------------
+  TokenUsageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: bedrock-token-usage
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # -------------------------------------------
+  # Lambda: ログ受信 → DynamoDB に記録
+  # -------------------------------------------
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bedrock-token-ingest
+      Handler: ingest.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TokenUsageTable
+          WINDOW_MINUTES: !Ref WindowMinutes
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TokenUsageTable
+
+  IngestLogPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IngestFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: !Sub logs.${AWS::Region}.amazonaws.com
+      SourceArn: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${BedrockLogGroupName}:*
+
+  IngestSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn:
+      - IngestLogPermission
+    Properties:
+      LogGroupName: !Ref BedrockLogGroupName
+      FilterPattern: '{ $.identity.arn = "*" }'
+      DestinationArn: !GetAtt IngestFunction.Arn
+
+  # -------------------------------------------
+  # Lambda: 定期チェック → 閾値超過で SNS 通知
+  # -------------------------------------------
+  CheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bedrock-token-check
+      Handler: check.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TokenUsageTable
+          TOKEN_THRESHOLD: !Ref TokenThreshold
+          WINDOW_MINUTES: !Ref WindowMinutes
+          SNS_TOPIC_ARN: !Ref TokenAlertTopic
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TokenUsageTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt TokenAlertTopic.TopicName
+      Events:
+        ScheduleCheck:
+          Type: Schedule
+          Properties:
+            Schedule: !Sub rate(${ScheduleRateMinutes} minutes)
+            Enabled: true
+
+Outputs:
+  TokenAlertTopicArn:
+    Description: SNS Topic ARN.
+    Value: !Ref TokenAlertTopic
+  TokenUsageTableName:
+    Description: DynamoDB Table for token count record.
+    Value: !Ref TokenUsageTable
