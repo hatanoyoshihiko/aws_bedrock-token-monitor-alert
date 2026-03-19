@@ -43,6 +43,16 @@ flowchart LR
 
 ## デプロイ
 
+### 事前準備
+
+- AWS CLIのインストール
+
+[こちら](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/getting-started-install.html)を参考にCLIのインストールとクレデンシャル設定を行ってください。
+
+- AWS SAMのインストール
+
+[こちら](https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/install-sam-cli.html)を参考にAWS SAM CLIのインストールを行ってください。
+
 ### 基本（必須パラメータのみ）
 
 ```bash
