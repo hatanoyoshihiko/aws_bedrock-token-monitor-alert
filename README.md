@@ -145,6 +145,35 @@ sam deploy \
 | Subscription Filter | `AWS::Logs::SubscriptionFilter` | CloudWatch Logs → Ingest Lambda |
 | EventBridge Schedule | Schedule イベント | Check Lambda の定期実行 |
 
+## DynamoDB TTL 設定
+
+トークン使用量レコードは DynamoDB の TTL（Time To Live）機能により自動削除されます。
+
+### TTL の計算
+
+Ingest Lambda がレコードを書き込む際、以下の式で TTL を設定します（`src/ingest.py`）:
+
+```
+ttl = 書き込み時刻（Unix エポック秒） + WindowMinutes × 60 + 300
+```
+
+デフォルト（`WindowMinutes=10`）では **書き込みから 15 分後** に失効します。
+
+| 要素 | 秒数 | 説明 |
+|---|---|---|
+| `WindowMinutes × 60` | 600秒（10分） | 集計ウィンドウ幅 |
+| バッファ | 300秒（5分） | DynamoDB の TTL 削除遅延に備えた余裕 |
+
+### ウィンドウ外レコードの扱い
+
+DynamoDB の TTL 削除は非同期のため、期限切れから実際の削除まで最大数十分かかる場合があります。
+Check Lambda は TTL 失効済みでも残っているレコードを誤集計しないよう、`epoch` フィールドで明示的にウィンドウ内のレコードのみをフィルタリングしています（`src/check.py`）:
+
+```python
+cutoff_epoch = int(time.time()) - (WINDOW_MINUTES * 60)
+# epoch が cutoff_epoch 未満のレコードはスキップ
+```
+
 ## セキュリティ設計
 
 ### IAM 最小権限
