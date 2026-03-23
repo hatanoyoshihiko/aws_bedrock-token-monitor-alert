@@ -70,6 +70,8 @@ BEDROCK_LOG_GROUP=/aws/bedrock/ \
 ./deploy.sh
 ```
 
+> **注意**: `TokenThreshold` / `WindowMinutes` / `ScheduleRateMinutes` は `deploy.sh` 経由では変更できません。変更する場合は後述の「[パラメータの変更](#パラメータの変更)」を参照してください。
+
 ### デプロイ後
 
 SNS からサブスクリプション確認メール（Subscription Confirmation）が届きます。
@@ -84,36 +86,48 @@ SNS からサブスクリプション確認メール（Subscription Confirmation
 | `AWS_REGION` | - | `ap-northeast-1` | デプロイ先リージョン |
 | `SNS_TOPIC_NAME` | `SnsTopicName` | `bedrock-token-alert` | SNS トピック名 |
 | `BEDROCK_LOG_GROUP` | `BedrockLogGroupName` | `/aws/bedrock/` | Bedrock ログのロググループ名 |
-| - | `TokenThreshold` | `1000000` | identity あたりのトークン閾値（入力＋出力合計） |
-| - | `WindowMinutes` | `10` | 集計対象のスライディングウィンドウ（分） |
-| - | `ScheduleRateMinutes` | `5` | Check Lambda の実行間隔（分） |
+| （`sam deploy` 直接実行） | `TokenThreshold` | `1000000` | identity あたりのトークン閾値（入力＋出力合計） |
+| （`sam deploy` 直接実行） | `WindowMinutes` | `10` | 集計対象のスライディングウィンドウ（分） |
+| （`sam deploy` 直接実行） | `ScheduleRateMinutes` | `5` | Check Lambda の実行間隔（分） |
 
-## トークン閾値の変更
+## パラメータの変更
 
-### デプロイ時に指定
+`TokenThreshold` / `WindowMinutes` / `ScheduleRateMinutes` を変更する場合は `sam deploy` を直接実行します。
 
-`deploy.sh` の `--parameter-overrides` に追加するか、直接 `sam deploy` を実行します:
+### 初回デプロイ時にカスタム値を指定
 
 ```bash
+sam build --template-file template.yaml
+
 sam deploy \
   --stack-name bedrock-token-monitor \
+  --region ap-northeast-1 \
   --resolve-s3 \
   --capabilities CAPABILITY_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
     SnsEmail=alert@example.com \
+    SnsTopicName=bedrock-token-alert \
+    BedrockLogGroupName=/aws/bedrock/ \
     TokenThreshold=1000000 \
-    WindowMinutes=10
+    WindowMinutes=10 \
+    ScheduleRateMinutes=5
+
 ```
 
-### デプロイ済みスタックの閾値を変更
+### デプロイ済みスタックのパラメータを変更
 
-同じコマンドを新しい閾値で再実行するだけです。スタックが更新されます:
+同じ `sam deploy` コマンドを新しい値で再実行するだけです（Termination Protection はスタック削除を防ぐものであり、更新には影響しません）:
 
 ```bash
+sam build --template-file template.yaml
+
 sam deploy \
   --stack-name bedrock-token-monitor \
+  --region ap-northeast-1 \
   --resolve-s3 \
   --capabilities CAPABILITY_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
     SnsEmail=alert@example.com \
     TokenThreshold=2000000
@@ -123,16 +137,40 @@ sam deploy \
 
 | リソース | 種類 | 説明 |
 |---|---|---|
-| SNS Topic | `AWS::SNS::Topic` | メール通知用 |
+| SNS Topic | `AWS::SNS::Topic` | メール通知用（KMS 暗号化付き） |
 | SNS Subscription | `AWS::SNS::Subscription` | メールアドレスの登録 |
-| DynamoDB Table | `AWS::DynamoDB::Table` | identity ごとのトークン記録（TTL で自動削除） |
-| Ingest Lambda | `AWS::Serverless::Function` | ログ受信 → DynamoDB 記録 |
+| DynamoDB Table | `AWS::DynamoDB::Table` | identity ごとのトークン記録（TTL・SSE 暗号化付き） |
+| Ingest Lambda | `AWS::Serverless::Function` | ログ受信 → DynamoDB 記録（同時実行数 10 に制限） |
 | Check Lambda | `AWS::Serverless::Function` | 定期集計 → 閾値判定 → SNS 通知 |
 | Subscription Filter | `AWS::Logs::SubscriptionFilter` | CloudWatch Logs → Ingest Lambda |
 | EventBridge Schedule | Schedule イベント | Check Lambda の定期実行 |
+
+## セキュリティ設計
+
+### IAM 最小権限
+
+- **Ingest Lambda**: `dynamodb:PutItem` / `dynamodb:BatchWriteItem` のみ許可（書き込み専用）
+- **Check Lambda**: `DynamoDBReadPolicy`（読み取り専用）＋ SNS Publish のみ許可
+- **Ingest Lambda の呼び出し元制限**: `SourceArn` で Bedrock のロググループからの呼び出しのみ許可
+
+### 保存データの暗号化
+
+- **DynamoDB**: SSE（Server-Side Encryption）を有効化。IAM ARN 等の個人識別情報を暗号化して保存
+- **SNS**: AWS マネージドキー（`alias/aws/sns`）による KMS 暗号化を有効化
+
+### データ保護
+
+- **DynamoDB `DeletionPolicy: Retain`**: CloudFormation スタック削除時もテーブルを保持
+- **DynamoDB `UpdateReplacePolicy: Retain`**: スタック更新時の意図しないテーブル再作成を防止
+
+### スロットリング
+
+- **Ingest Lambda `ReservedConcurrentExecutions: 10`**: 大量ログ流入時のアカウント全体への同時実行数消費を防止
 
 ## 削除
 
 ```bash
 aws cloudformation delete-stack --stack-name bedrock-token-monitor --region ap-northeast-1
 ```
+
+> **注意**: DynamoDB テーブルは `DeletionPolicy: Retain` のため、スタック削除後もテーブルが残ります。テーブルも削除する場合は別途 AWS コンソールまたは CLI で削除してください。

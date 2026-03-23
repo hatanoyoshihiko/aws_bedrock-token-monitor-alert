@@ -55,6 +55,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Ref SnsTopicName
+      KmsMasterKeyId: alias/aws/sns
 
   TokenAlertSubscription:
     Type: AWS::SNS::Subscription
@@ -68,6 +69,8 @@ Resources:
   # -------------------------------------------
   TokenUsageTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: bedrock-token-usage
       BillingMode: PAY_PER_REQUEST
@@ -84,6 +87,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      SSESpecification:
+        SSEEnabled: true
 
   # -------------------------------------------
   # Lambda: ログ受信 → DynamoDB に記録
@@ -94,13 +99,18 @@ Resources:
       FunctionName: bedrock-token-ingest
       Handler: ingest.handler
       CodeUri: src/
+      ReservedConcurrentExecutions: 10
       Environment:
         Variables:
           TABLE_NAME: !Ref TokenUsageTable
           WINDOW_MINUTES: !Ref WindowMinutes
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TokenUsageTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:BatchWriteItem
+              Resource: !GetAtt TokenUsageTable.Arn
 
   IngestLogPermission:
     Type: AWS::Lambda::Permission
