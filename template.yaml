@@ -1,19 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: >
-  Bedrock トークン使用量モニター（IAMユーザー/ロール/APIキー単位）。
-  Model Invocation Logging のログを Lambda で集計し、
-  identity ごとのトークン合計が閾値を超えた場合に SNS 経由でメール通知します。
-
-  前提条件:
-    - Bedrock Model Invocation Logging が有効化済みで、
-      CloudWatch Logs にログが出力されていること。
-
+Description:  Bedrock Token Usage Monitor (by IAM user, role, or Bedrock API key).
 Parameters:
   BedrockLogGroupName:
     Type: String
     Default: /aws/bedrock/
-    Description: Bedrock Model Invocation Logging の出力先ロググループ名。
+    Description: Bedrock Model Invocation Logging CloudWatch Log Group Name.
 
   SnsEmail:
     Type: String
